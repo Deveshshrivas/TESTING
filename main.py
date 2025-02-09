@@ -4,9 +4,7 @@ import numpy as np
 from insightface.app import FaceAnalysis
 from sklearn.preprocessing import normalize
 import faiss
-
-# Define a very strict similarity threshold (values close to 1.0 are very strict)
-HIGH_SIMILARITY_THRESHOLD = 0.9
+from sklearn.metrics.pairwise import cosine_similarity
 
 def build_faiss_index(embeddings):
     """
@@ -15,9 +13,10 @@ def build_faiss_index(embeddings):
     """
     if not embeddings:
         raise ValueError("Embeddings list is empty, cannot build Faiss index.")
-
+    
     embeddings_array = np.array(embeddings).astype('float32')
-    index = faiss.IndexFlatIP(embeddings_array.shape[1])
+    # Create the Faiss index for cosine similarity (use IP for inner product)
+    index = faiss.IndexFlatIP(embeddings_array.shape[1])  # Use inner product (cosine similarity)
     index.add(embeddings_array)
     return index
 
@@ -30,21 +29,21 @@ def extract_embeddings(model, image_path):
     if img is None:
         print(f"Error: Unable to read image at {image_path}")
         return [], []
-
-    faces = model.get(img)  # Detect faces and extract embeddings
+    
+    # Detect faces and extract embeddings
+    faces = model.get(img)
     embeddings = []
 
     for face in faces:
         bbox = face.bbox
-        print(f"Detected face bounding box: {bbox}")  # Debug: show bounding box
+        print(f"Detected face bounding box: {bbox}")  # Debugging bounding box
         cropped_face = preprocess_face(img, bbox)
         if cropped_face is None:
             continue
 
-        # Ensure the embedding is normalized.
         embedding = face.embedding
-        normalized_embedding = normalize(embedding.reshape(1, -1))[0]
-        embeddings.append(normalized_embedding)
+        embeddings.append(normalize(embedding.reshape(1, -1))[0])  # Normalize embeddings
+
     return faces, embeddings
 
 def preprocess_face(image, bbox):
@@ -59,36 +58,30 @@ def preprocess_face(image, bbox):
 
 def find_closest_face(embedding, index, profiles, threshold=HIGH_SIMILARITY_THRESHOLD):
     """
-    Find the closest known face for a given query embedding.
-    Returns the matched profile name and similarity if the similarity is above the threshold,
-    otherwise returns (None, None).
+    Find the closest match in the Faiss index with a strict similarity threshold using cosine similarity.
     """
     # Search for the top 1 nearest neighbor
     distances, indices = index.search(np.array([embedding]).astype('float32'), 1)
     closest_idx = indices[0][0]
     closest_similarity = distances[0][0]  # For normalized embeddings, this is the cosine similarity
 
-    if closest_similarity > threshold:
-        return profiles[closest_idx], closest_similarity
+    if closest_distance > threshold:  # Use higher threshold to be more lenient with partial faces
+        return profiles[closest_idx], closest_distance  # Use cosine similarity directly
     return None, None
 
 def main():
     known_faces_dir = "known_faces"
-    query_faces_dir = "query_faces"
-
     os.makedirs(known_faces_dir, exist_ok=True)
-    os.makedirs(query_faces_dir, exist_ok=True)
 
     print("Loading Face Recognition Model from local directory...")
-    # Initialize the InsightFace model
     model = FaceAnalysis()
-    model.prepare(ctx_id=0, det_size=(640, 640))  # Use GPU if available
+    model.prepare(ctx_id=0, det_size=(640, 640))  # Prepare model with GPU if available
 
     print("Processing known faces...")
     known_embeddings = []
     profile_names = []
 
-    # Process known faces and extract embeddings
+    # Process the known faces and extract embeddings
     for filename in os.listdir(known_faces_dir):
         filepath = os.path.join(known_faces_dir, filename)
         if os.path.isfile(filepath):
@@ -106,24 +99,23 @@ def main():
     print("Building Faiss index with cosine similarity...")
     index = build_faiss_index(known_embeddings)
 
-    print("Processing query (group) faces...")
-    # Process query (group) images and compare each detected face with known embeddings
+    print("Processing query faces...")
+    # Process the query faces and compare them with known embeddings
     for filename in os.listdir(query_faces_dir):
         filepath = os.path.join(query_faces_dir, filename)
         if os.path.isfile(filepath):
-            print(f"\nProcessing {filename}...")
+            print(f"Processing {filename}...")
             faces, embeddings = extract_embeddings(model, filepath)
             if not embeddings:
                 print(f"No faces found in {filename}. Skipping...")
                 continue
 
-            # Iterate over each detected face in the query image
-            for i, embedding in enumerate(embeddings):
-                name, similarity = find_closest_face(embedding, index, profile_names, threshold=HIGH_SIMILARITY_THRESHOLD)
-                if name:
-                    print(f"Face {i+1}: Match found: {name} (Similarity: {similarity:.4f})")
-                else:
-                    print(f"Face {i+1}: No match found.")
+            # Find the best match for all detected faces in the query image
+            name, similarity = find_best_match(embeddings, known_embeddings, profile_names, index, threshold=0.4)
+            if name:
+                print(f"Match found: {name} (Similarity: {similarity:.4f})")
+            else:
+                print("No match found for the key person in this image.")
 
 if __name__ == "__main__":
     main()
